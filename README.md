@@ -12,6 +12,7 @@ Erstelle eine Webapp in der folgende Funktionalitäten bereitgestellt werden:
 - User anlegen und anpassen können
 - User blockieren und freischalten können
 - In der Tabelle nach verschiedenen Attributen sortieren und filtern können
+- Nutze für die Darstellung Vuetify
 
 In der Präsentation:
 - Vorstellung der App
