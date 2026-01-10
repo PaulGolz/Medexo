@@ -2,14 +2,36 @@ const router = require('express').Router();
 const { ObjectId } = require('mongodb');
 const { connectToMongoDB } = require('../database/mongodb');
 const { userValidation } = require('../validation/userValidation');
+const multer = require('multer');
+const csv = require('csv-parser');
+const { Readable } = require('stream');
 
-// GET /v1/users - Alle User abrufen mit Filterung, Sortierung, Pagination
+// Multer config für CSV upload
+// memoryStorage: Datei im RAM verarbeitet (schneller für kleine Dateien)
+// limits: verhindert Denial of Service durch z.B. zu große Dateien
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB max um sicherzugehen
+    files: 1 // eine datei auf einmal reicht
+  },
+  fileFilter: (req, file, cb) => {
+    // nur csv format
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are allowed'), false);
+    }
+  }
+});
+
+// GET /v1/users alle user mit filter, sort und pagination
 router.get('', async (req, res, next) => {
   try {
     const { db } = await connectToMongoDB();
     const collection = db.collection('users');
     
-    // Query-Builder für Filterung
+    // Query builder für filter
     const query = {};
     if (req.query.active !== undefined) {
       query.active = req.query.active === 'true';
@@ -18,20 +40,20 @@ router.get('', async (req, res, next) => {
       query.blocked = req.query.blocked === 'true';
     }
     if (req.query.location) {
-      query.location = { $regex: req.query.location, $options: 'i' }; // Case-insensitive
+      query.location = { $regex: req.query.location, $options: 'i' }; 
     }
     
-    // Sortierung
+    // sort
     const sortBy = req.query.sortBy || 'name';
     const sortOrder = req.query.sortOrder === 'desc' ? -1 : 1;
     const sort = { [sortBy]: sortOrder };
     
-    // Pagination
+    // pagination
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 50;
     const skip = (page - 1) * limit;
     
-    // Daten abrufen
+    // daten
     const [users, total] = await Promise.all([
       collection.find(query).sort(sort).skip(skip).limit(limit).toArray(),
       collection.countDocuments(query)
@@ -52,7 +74,7 @@ router.get('', async (req, res, next) => {
   }
 });
 
-// GET /v1/users/:id - Einzelnen User abrufen
+// GET /v1/users/:id ein user 
 router.get('/:id', async (req, res, next) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
@@ -78,7 +100,7 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// POST /v1/users - Neuen User erstellen
+// POST /v1/users ein user
 router.post('', async (req, res, next) => {
   try {
     // Validierung
@@ -118,7 +140,7 @@ router.post('', async (req, res, next) => {
   }
 });
 
-// PATCH /v1/users/:id - User aktualisieren
+// PATCH /v1/users/:id ein user updaten
 router.patch('/:id', async (req, res, next) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
@@ -139,7 +161,7 @@ router.patch('/:id', async (req, res, next) => {
     const { db } = await connectToMongoDB();
     const collection = db.collection('users');
     
-    // User existiert?
+    // user existiert?
     const existing = await collection.findOne({ _id: new ObjectId(req.params.id) });
     if (!existing) {
       const error = new Error('User not found');
@@ -147,7 +169,7 @@ router.patch('/:id', async (req, res, next) => {
       throw error;
     }
     
-    // Email-Änderung: Eindeutigkeit prüfen
+    // Email Änderung duplicate check
     if (validation.data.email && validation.data.email !== existing.email) {
       const emailExists = await collection.findOne({ email: validation.data.email });
       if (emailExists) {
@@ -157,7 +179,7 @@ router.patch('/:id', async (req, res, next) => {
       }
     }
     
-    // Update
+    // update
     const updateData = {
       ...validation.data,
       updatedAt: new Date()
@@ -175,7 +197,7 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-// PATCH /v1/users/:id/block - User blockieren
+// PATCH /v1/users/:id/block ein user blockieren
 router.patch('/:id/block', async (req, res, next) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
@@ -205,7 +227,7 @@ router.patch('/:id/block', async (req, res, next) => {
   }
 });
 
-// PATCH /v1/users/:id/unblock - User freischalten
+// PATCH /v1/users/:id/unblock user unblock
 router.patch('/:id/unblock', async (req, res, next) => {
   try {
     if (!ObjectId.isValid(req.params.id)) {
@@ -230,6 +252,189 @@ router.patch('/:id/unblock', async (req, res, next) => {
     
     const updatedUser = await collection.findOne({ _id: new ObjectId(req.params.id) });
     res.json({ success: true, data: updatedUser });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /v1/users/import csv import
+// Warum Backend: validierung erzwungen, consistency (ACID), fehler zentralisiert
+router.post('/import', upload.single('file'), async (req, res, next) => {
+  try {
+    // Prüfe ob Datei hochgeladen wurde
+    if (!req.file) {
+      const error = new Error('No file uploaded');
+      error.status = 400;
+      throw error;
+    }
+    
+    const { db } = await connectToMongoDB();
+    const collection = db.collection('users');
+    
+    // CSV Parsing, streaming für große Dateien
+    const csvContent = req.file.buffer.toString('utf-8');
+    const records = [];
+    
+    // Promise based Parsing (csv-parser nutzt Streams)
+    // keine expliziten header: csv-parser liest Header automatisch aus erster Zeile
+    await new Promise((resolve, reject) => {
+      const stream = Readable.from(csvContent);
+      stream
+        .pipe(csv({
+          skipEmptyLines: true,
+          trim: true
+          // header automatisch aus erster Zeile lesen
+        }))
+        .on('data', (row) => {
+          records.push(row);
+        })
+        .on('end', () => {
+          resolve();
+        })
+        .on('error', (error) => {
+          reject(error);
+        });
+    });
+    
+    // csv nicht leer
+    if (records.length === 0) {
+      const error = new Error('CSV file is empty or has no valid rows');
+      error.status = 400;
+      throw error;
+    }
+    
+    // max 10000 Zeilen
+    if (records.length > 10000) {
+      const error = new Error('CSV file too large (max 10000 rows)');
+      error.status = 400;
+      throw error;
+    }
+    
+    // Spalten vorhanden?
+    // Keys der ersten Zeile prüfen
+    const expectedHeaders = ['Name', 'Email', 'IPAddress', 'Location', 'Active', 'LastLogin'];
+    const firstRow = records[0];
+    const headers = Object.keys(firstRow);
+    const missingHeaders = expectedHeaders.filter(h => !headers.includes(h));
+    if (missingHeaders.length > 0) {
+      const error = new Error(`Missing required headers: ${missingHeaders.join(', ')}. Found: ${headers.join(', ')}`);
+      error.status = 400;
+      throw error;
+    }
+    
+    // zeile validieren und verarbeiten
+    const results = {
+      total: records.length,
+      imported: 0,
+      updated: 0,
+      skipped: 0,
+      errors: []
+    };
+    
+    // duplikate in der csv ?
+    const csvEmails = new Set();
+    
+    for (let i = 0; i < records.length; i++) {
+      const row = records[i];
+      const rowNumber = i + 2; // +2 Header + 1 index
+      
+      try {
+        // gleiche email mehrfach in csv ?
+        const emailLower = row.Email?.toLowerCase().trim();
+        if (!emailLower) {
+          results.errors.push({
+            row: rowNumber,
+            email: row.Email || 'N/A',
+            error: 'Email is required'
+          });
+          results.skipped++;
+          continue;
+        }
+        
+        if (csvEmails.has(emailLower)) {
+          results.errors.push({
+            row: rowNumber,
+            email: row.Email,
+            error: 'Duplicate email in CSV file'
+          });
+          results.skipped++;
+          continue;
+        }
+        csvEmails.add(emailLower);
+        
+        // daten transformieren
+        const csvRow = {
+          name: row.Name?.trim(),
+          email: emailLower,
+          ipAddress: row.IPAddress?.trim() || null,
+          location: row.Location?.trim() || null,
+          active: row.Active?.trim(),
+          lastLogin: row.LastLogin?.trim() || null
+        };
+        
+        // validation mit joi
+        const validation = userValidation(csvRow, 'csv');
+        if (!validation.isValid) {
+          results.errors.push({
+            row: rowNumber,
+            email: row.Email,
+            errors: validation.errors
+          });
+          results.skipped++;
+          continue;
+        }
+        
+        const userData = validation.data;
+        
+        // email schon vorhanden?
+        const existing = await collection.findOne({ 
+          email: userData.email.toLowerCase() 
+        });
+        
+        if (existing) {
+          // update bestehender user (upsert)
+          // blocked unverändert
+          await collection.updateOne(
+            { _id: existing._id },
+            {
+              $set: {
+                name: userData.name,
+                email: userData.email,
+                ipAddress: userData.ipAddress,
+                location: userData.location,
+                active: userData.active,
+                lastLogin: userData.lastLogin,
+                updatedAt: new Date()
+                // blocked wird NICHT überschrieben
+              }
+            }
+          );
+          results.updated++;
+        } else {
+          // neuer user
+          await collection.insertOne({
+            ...userData,
+            blocked: false,
+            createdAt: new Date(),
+            updatedAt: new Date()
+          });
+          results.imported++;
+        }
+      } catch (error) {
+        // fehler loggen und weitermachen
+        results.errors.push({
+          row: rowNumber,
+          email: row.Email || 'N/A',
+          error: error.message
+        });
+        results.skipped++;
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: results
+    });
   } catch (error) {
     next(error);
   }

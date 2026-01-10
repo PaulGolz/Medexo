@@ -1,25 +1,25 @@
 const { MongoClient } = require('mongodb');
 
-// Connection String (wie vorgegeben - funktioniert in Development, Credentials werden ignoriert)
-// Für Production: MongoDB Auth aktivieren und echte Credentials verwenden
-const uri = "mongodb://root:root@mongo-user:27017/userdb";
+// Connection String (ohne Auth, da MongoDB im Development Modus ohne Authentifizierung läuft)
+// Für Production MongoDB Auth aktivieren und echte credentials verwenden
+const uri = "mongodb://mongo-user:27017/userdb";
 
-// Connection Options mit Pooling (Best Practice für MongoDB Node.js Driver)
+// best practice mit pooling
 const options = {
-  maxPoolSize: 10, // Maximale Anzahl Connections im Pool (Standard: 100)
-  minPoolSize: 2,  // Minimale Anzahl Connections (Standard: 0)
-  maxIdleTimeMS: 30000, // Connection wird nach 30s Inaktivität geschlossen
-  serverSelectionTimeoutMS: 5000, // Timeout für Server-Auswahl (Standard: 30000)
-  socketTimeoutMS: 45000, // Timeout für Socket-Operationen (Standard: 0 = kein Timeout)
+  maxPoolSize: 10,
+  minPoolSize: 2, 
+  maxIdleTimeMS: 30000, // nach 30s inactive close
+  serverSelectionTimeoutMS: 5000, // server auswahl timeout
+  socketTimeoutMS: 45000, // timeout socket operationen
 };
 
 let client = null;
 let db = null;
 
-// Singleton Pattern: Eine Connection für die gesamte App (Best Practice)
-// Verhindert Connection-Leaks und verbessert Performance
+// eine connection für die gesamte app
+// verhindert connection leaks und verbessert performance
 async function connectToMongoDB() {
-  // Prüfe ob Connection bereits existiert und verbunden ist
+  // connection existiert und verbunden?
   if (client && client.topology && client.topology.isConnected()) {
     return { client, db };
   }
@@ -29,7 +29,7 @@ async function connectToMongoDB() {
     await client.connect();
     db = client.db('userdb');
     
-    // Index-Erstellung beim ersten Connect (nur einmal)
+    // nur einmal index erstellen
     await createIndexes(db);
     
     console.log('MongoDB connected successfully');
@@ -40,32 +40,32 @@ async function connectToMongoDB() {
   }
 }
 
-// Index-Erstellung für Performance
+// index für performance
 async function createIndexes(db) {
   try {
     const usersCollection = db.collection('users');
     
-    // Unique Index auf email für Duplikat-Prävention
+    // unique index auf email 
     await usersCollection.createIndex({ email: 1 }, { unique: true });
     
-    // Index auf häufig gefilterte Felder
+    // index auf häufige queries
     await usersCollection.createIndex({ active: 1 });
     await usersCollection.createIndex({ blocked: 1 });
     await usersCollection.createIndex({ location: 1 });
     
-    // Compound Index für häufige Queries
+    // compound index
     await usersCollection.createIndex({ active: 1, blocked: 1 });
     
     console.log('MongoDB indexes created successfully');
   } catch (error) {
-    // Index könnte bereits existieren, das ist OK
-    if (error.code !== 85) { // 85 = IndexOptionsConflict
+    // egal wenn index bereits existiert
+    if (error.code !== 85) {
       console.error('Error creating indexes:', error);
     }
   }
 }
 
-// Graceful Shutdown
+// easy shutdown
 async function closeConnection() {
   if (client) {
     await client.close();
@@ -73,7 +73,7 @@ async function closeConnection() {
   }
 }
 
-// Process-Events für Cleanup
+// event cleanup
 process.on('SIGINT', async () => {
   await closeConnection();
   process.exit(0);
