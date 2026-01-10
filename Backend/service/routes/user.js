@@ -259,6 +259,9 @@ router.patch('/:id/unblock', async (req, res, next) => {
 
 // POST /v1/users/import csv import
 // Warum Backend: validierung erzwungen, consistency (ACID), fehler zentralisiert
+// Query-Parameter: duplicateStrategy = 'error' | 'skip' (default: 'skip')
+// - 'error': Duplikate werden als separate Liste zurückgegeben für manuelle Behandlung
+// - 'skip': Duplikate werden automatisch übersprungen (bisheriges Verhalten)
 router.post('/import', upload.single('file'), async (req, res, next) => {
   try {
     // Prüfe ob Datei hochgeladen wurde
@@ -267,6 +270,9 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       error.status = 400;
       throw error;
     }
+    
+    // Duplikat-Strategie aus Query-Parameter
+    const duplicateStrategy = req.query.duplicateStrategy || 'skip'; // 'error' oder 'skip'
     
     const { db } = await connectToMongoDB();
     const collection = db.collection('users');
@@ -328,7 +334,8 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
       imported: 0,
       updated: 0,
       skipped: 0,
-      errors: []
+      errors: [],
+      duplicates: [] // Duplikate für manuelle Behandlung
     };
     
     // duplikate in der csv ?
@@ -392,24 +399,51 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
         });
         
         if (existing) {
-          // update bestehender user (upsert)
-          // blocked unverändert
-          await collection.updateOne(
-            { _id: existing._id },
-            {
-              $set: {
+          // Duplikat gefunden
+          if (duplicateStrategy === 'error') {
+            // Duplikat zur Liste hinzufügen für manuelle Behandlung
+            results.duplicates.push({
+              row: rowNumber,
+              email: userData.email,
+              name: userData.name,
+              location: userData.location,
+              existingUser: {
+                _id: existing._id.toString(),
+                name: existing.name,
+                email: existing.email,
+                location: existing.location,
+                active: existing.active,
+                blocked: existing.blocked
+              },
+              csvData: {
                 name: userData.name,
                 email: userData.email,
                 ipAddress: userData.ipAddress,
                 location: userData.location,
                 active: userData.active,
-                lastLogin: userData.lastLogin,
-                updatedAt: new Date()
-                // blocked wird NICHT überschrieben
+                lastLogin: userData.lastLogin
               }
-            }
-          );
-          results.updated++;
+            });
+            results.skipped++;
+          } else {
+            // 'skip' Strategie: automatisch updaten (bisheriges Verhalten)
+            await collection.updateOne(
+              { _id: existing._id },
+              {
+                $set: {
+                  name: userData.name,
+                  email: userData.email,
+                  ipAddress: userData.ipAddress,
+                  location: userData.location,
+                  active: userData.active,
+                  lastLogin: userData.lastLogin,
+                  updatedAt: new Date()
+                  // blocked wird NICHT überschrieben
+                }
+              }
+            );
+            results.updated++;
+          }
         } else {
           // neuer user
           await collection.insertOne({
@@ -425,6 +459,121 @@ router.post('/import', upload.single('file'), async (req, res, next) => {
         results.errors.push({
           row: rowNumber,
           email: row.Email || 'N/A',
+          error: error.message
+        });
+        results.skipped++;
+      }
+    }
+    
+    res.json({
+      success: true,
+      data: results
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /v1/users/import/process-duplicates - Verarbeite ausgewählte Duplikate
+// Body: { duplicates: [{ row, action: 'import' | 'skip', ...csvData }] }
+// - action: 'import' = trotzdem hinzufügen (Update), 'skip' = verwerfen
+router.post('/import/process-duplicates', async (req, res, next) => {
+  try {
+    const { duplicates } = req.body;
+    
+    if (!Array.isArray(duplicates)) {
+      const error = new Error('duplicates must be an array');
+      error.status = 400;
+      throw error;
+    }
+    
+    const { db } = await connectToMongoDB();
+    const collection = db.collection('users');
+    
+    const results = {
+      imported: 0,
+      skipped: 0,
+      errors: []
+    };
+    
+    for (const duplicate of duplicates) {
+      try {
+        const { row, action, csvData, existingUserId } = duplicate;
+        
+        if (action === 'skip') {
+          results.skipped++;
+          continue;
+        }
+        
+        if (action === 'import') {
+          // Validierung
+          const validation = userValidation(csvData, 'csv');
+          if (!validation.isValid) {
+            results.errors.push({
+              row,
+              email: csvData.email,
+              errors: validation.errors
+            });
+            results.skipped++;
+            continue;
+          }
+          
+          const userData = validation.data;
+          
+          // Update bestehenden User
+          if (existingUserId && ObjectId.isValid(existingUserId)) {
+            await collection.updateOne(
+              { _id: new ObjectId(existingUserId) },
+              {
+                $set: {
+                  name: userData.name,
+                  email: userData.email,
+                  ipAddress: userData.ipAddress,
+                  location: userData.location,
+                  active: userData.active,
+                  lastLogin: userData.lastLogin,
+                  updatedAt: new Date()
+                  // blocked wird NICHT überschrieben
+                }
+              }
+            );
+            results.imported++;
+          } else {
+            // Fallback: Suche nach Email
+            const existing = await collection.findOne({ 
+              email: userData.email.toLowerCase() 
+            });
+            
+            if (existing) {
+              await collection.updateOne(
+                { _id: existing._id },
+                {
+                  $set: {
+                    name: userData.name,
+                    email: userData.email,
+                    ipAddress: userData.ipAddress,
+                    location: userData.location,
+                    active: userData.active,
+                    lastLogin: userData.lastLogin,
+                    updatedAt: new Date()
+                  }
+                }
+              );
+              results.imported++;
+            } else {
+              results.errors.push({
+                row,
+                email: csvData.email,
+                error: 'Existing user not found'
+              });
+              results.skipped++;
+            }
+          }
+        }
+      } catch (error) {
+        results.errors.push({
+          row: duplicate.row,
+          email: duplicate.csvData?.email || 'N/A',
           error: error.message
         });
         results.skipped++;

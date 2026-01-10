@@ -54,12 +54,16 @@ export const userService = {
   
   unblockUser: (id) => api.patch(`/users/${id}/unblock`),
   
-  importUsers: (file) => {
+  importUsers: (file, duplicateStrategy = 'skip') => {
     const formData = new FormData()
     formData.append('file', file)
-    return api.post('/users/import', formData, {
+    return api.post(`/users/import?duplicateStrategy=${duplicateStrategy}`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
+  },
+  
+  processDuplicates: (duplicates) => {
+    return api.post('/users/import/process-duplicates', { duplicates })
   }
 }
 

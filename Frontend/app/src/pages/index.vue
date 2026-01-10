@@ -138,7 +138,7 @@
     </v-dialog>
 
     <!-- CSV Import Dialog -->
-    <v-dialog v-model="importDialog" max-width="600px">
+    <v-dialog v-model="importDialog" max-width="800px">
       <v-card>
         <v-card-title>CSV Import</v-card-title>
         <v-card-text>
@@ -149,7 +149,101 @@
             show-size
             :disabled="importing"
           ></v-file-input>
-          <v-alert v-if="importResult" type="info" class="mt-4">
+          
+          <!-- Duplikat-Strategie Option -->
+          <v-select
+            v-model="duplicateStrategy"
+            label="Duplikat-Behandlung"
+            :items="[
+              { title: 'Automatisch überspringen', value: 'skip' },
+              { title: 'Manuelle Kontrolle', value: 'error' }
+            ]"
+            class="mt-4"
+            :disabled="importing"
+          ></v-select>
+          
+          <!-- Duplikat-Auswahl UI (nur wenn Duplikate vorhanden) -->
+          <v-card v-if="importResult?.duplicates?.length > 0" class="mt-4" variant="outlined">
+            <v-card-title class="text-subtitle-1">
+              Duplikate gefunden ({{ importResult.duplicates.length }})
+            </v-card-title>
+            <v-card-text>
+              <!-- Bulk-Aktionen für bessere UX bei vielen Duplikaten -->
+              <div class="d-flex gap-2 mb-4">
+                <v-btn
+                  color="error"
+                  variant="outlined"
+                  size="small"
+                  @click="setAllDuplicatesAction('skip')"
+                >
+                  Alle verwerfen
+                </v-btn>
+                <v-btn
+                  color="success"
+                  variant="outlined"
+                  size="small"
+                  @click="setAllDuplicatesAction('import')"
+                >
+                  Alle hinzufügen
+                </v-btn>
+                <v-spacer></v-spacer>
+                <v-chip size="small">
+                  {{ getSelectedDuplicatesCount() }} ausgewählt
+                </v-chip>
+              </div>
+              
+              <!-- Kompakte Duplikat-Liste mit Scroll -->
+              <v-list density="compact" class="duplicate-list" style="max-height: 300px; overflow-y: auto;">
+                <v-list-item
+                  v-for="(duplicate, index) in importResult.duplicates"
+                  :key="index"
+                  class="px-0"
+                >
+                  <template v-slot:prepend>
+                    <v-checkbox
+                      v-model="duplicate.selected"
+                      :value="true"
+                      hide-details
+                      density="compact"
+                      class="mr-2"
+                    ></v-checkbox>
+                  </template>
+                  <v-list-item-title class="text-caption">
+                    <strong>{{ duplicate.email }}</strong> | Zeile {{ duplicate.row }}
+                  </v-list-item-title>
+                  <v-list-item-subtitle class="text-caption">
+                    CSV: {{ duplicate.name }} ({{ duplicate.location }}) | 
+                    Vorhanden: {{ duplicate.existingUser.name }}
+                  </v-list-item-subtitle>
+                  <template v-slot:append>
+                    <v-btn-toggle
+                      v-model="duplicate.action"
+                      mandatory
+                      density="compact"
+                      variant="outlined"
+                      size="x-small"
+                    >
+                      <v-btn value="skip" size="x-small">Skip</v-btn>
+                      <v-btn value="import" size="x-small">Add</v-btn>
+                    </v-btn-toggle>
+                  </template>
+                </v-list-item>
+              </v-list>
+              
+              <v-btn
+                color="primary"
+                @click="processDuplicates"
+                :loading="processingDuplicates"
+                :disabled="getSelectedDuplicatesCount() === 0"
+                class="mt-4"
+                block
+              >
+                {{ getSelectedDuplicatesCount() }} Duplikate verarbeiten
+              </v-btn>
+            </v-card-text>
+          </v-card>
+          
+          <v-alert v-if="importResult && !importResult.duplicates?.length" type="info" class="mt-4">
             <v-list density="compact" class="pa-0">
               <v-list-item class="pa-0">
                 <v-list-item-title>Total: {{ importResult.total }}</v-list-item-title>
@@ -250,6 +344,8 @@ const importDialog = ref(false)
 const csvFile = ref(null)
 const importing = ref(false)
 const importResult = ref(null)
+const duplicateStrategy = ref('skip') // 'error' oder 'skip'
+const processingDuplicates = ref(false)
 
 // Snackbar
 const snackbar = reactive({
@@ -334,6 +430,7 @@ const openImportDialog = () => {
   importDialog.value = true
   csvFile.value = null
   importResult.value = null
+  duplicateStrategy.value = 'skip'
 }
 
 const importCSV = async () => {
@@ -341,18 +438,87 @@ const importCSV = async () => {
   
   importing.value = true
   try {
-    const response = await userService.importUsers(csvFile.value)
-    // Response-Struktur vom Backend: { success: true, data: { imported, updated, skipped, errors, total } }
+    const response = await userService.importUsers(csvFile.value, duplicateStrategy.value)
+    // Response-Struktur vom Backend: { success: true, data: { imported, updated, skipped, errors, duplicates, total } }
     // Axios Interceptor gibt response.data zurück, also ist response = { success: true, data: {...} }
     // Daher: response.data enthält die eigentlichen Ergebnisse (imported, updated, etc.)
     const result = response.data || response // response.data ist das results-Objekt
     importResult.value = result
-    showSnackbar(`Import abgeschlossen: ${result.imported} importiert, ${result.updated} aktualisiert`, 'success')
-    await loadUsers()
+    
+    // Duplikate für UI vorbereiten (selected und action hinzufügen)
+    if (result.duplicates && result.duplicates.length > 0) {
+      result.duplicates.forEach(dup => {
+        dup.selected = true // Standard: alle ausgewählt
+        dup.action = dup.action || 'skip' // Standard: verwerfen
+      })
+    }
+    
+    if (duplicateStrategy.value === 'skip' || !result.duplicates?.length) {
+      showSnackbar(`Import abgeschlossen: ${result.imported} importiert, ${result.updated} aktualisiert`, 'success')
+      await loadUsers()
+    } else {
+      showSnackbar(`${result.duplicates.length} Duplikate gefunden. Bitte wählen Sie die Aktion.`, 'info')
+    }
   } catch (error) {
     showSnackbar('Fehler beim Import', 'error')
   } finally {
     importing.value = false
+  }
+}
+
+const setAllDuplicatesAction = (action) => {
+  if (!importResult.value?.duplicates?.length) return
+  importResult.value.duplicates.forEach(dup => {
+    dup.selected = true
+    dup.action = action
+  })
+}
+
+const getSelectedDuplicatesCount = () => {
+  return importResult.value?.duplicates?.filter(dup => dup.selected).length || 0
+}
+
+const processDuplicates = async () => {
+  if (!importResult.value?.duplicates?.length) return
+  
+  processingDuplicates.value = true
+  try {
+    // Nur ausgewählte Duplikate verarbeiten
+    const selectedDuplicates = importResult.value.duplicates
+      .filter(dup => dup.selected)
+      .map(dup => ({
+        row: dup.row,
+        action: dup.action, // 'import' oder 'skip'
+        csvData: dup.csvData,
+        existingUserId: dup.existingUser._id
+      }))
+    
+    if (selectedDuplicates.length === 0) {
+      showSnackbar('Bitte wählen Sie mindestens ein Duplikat aus', 'warning')
+      return
+    }
+    
+    const response = await userService.processDuplicates(selectedDuplicates)
+    const result = response.data || response
+    
+    showSnackbar(`Duplikate verarbeitet: ${result.imported} hinzugefügt, ${result.skipped} verworfen`, 'success')
+    
+    // Duplikate aus der Liste entfernen
+    importResult.value.duplicates = importResult.value.duplicates.filter(dup => !dup.selected)
+    
+    // Wenn keine Duplikate mehr vorhanden, Dialog schließen oder Ergebnisse aktualisieren
+    if (importResult.value.duplicates.length === 0) {
+      await loadUsers()
+      importDialog.value = false
+    } else {
+      // Ergebnisse aktualisieren
+      importResult.value.imported += result.imported
+      importResult.value.skipped += result.skipped
+    }
+  } catch (error) {
+    showSnackbar('Fehler beim Verarbeiten der Duplikate', 'error')
+  } finally {
+    processingDuplicates.value = false
   }
 }
 
