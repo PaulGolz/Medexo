@@ -1,5 +1,11 @@
 import axios from 'axios'
 
+// Separate axios instance für Blob-Responses (Export)
+const axiosRaw = axios.create({
+  baseURL: 'http://localhost:4001/v1',
+  timeout: 10000
+})
+
 // Zentral API konfigurieren
 const api = axios.create({
   baseURL: 'http://localhost:4001/v1',
@@ -53,6 +59,17 @@ export const userService = {
   blockUser: (id) => api.patch(`/users/${id}/block`),
   
   unblockUser: (id) => api.patch(`/users/${id}/unblock`),
+  
+  deleteUser: (id) => api.delete(`/users/${id}`),
+  
+  exportUsers: (filters = {}, sortBy = 'name', sortOrder = 'asc') => {
+    const params = { ...filters, sortBy, sortOrder }
+    // Separate axios instance für Blob-Responses (ohne Interceptor)
+    return axiosRaw.get('/users/export', {
+      params,
+      responseType: 'blob'
+    })
+  },
   
   importUsers: (file, duplicateStrategy = 'skip') => {
     const formData = new FormData()

@@ -257,6 +257,32 @@ router.patch('/:id/unblock', async (req, res, next) => {
   }
 });
 
+// DELETE /v1/users/:id user löschen
+router.delete('/:id', async (req, res, next) => {
+  try {
+    if (!ObjectId.isValid(req.params.id)) {
+      const error = new Error('Invalid user ID format');
+      error.status = 400;
+      throw error;
+    }
+    
+    const { db } = await connectToMongoDB();
+    const collection = db.collection('users');
+    
+    const result = await collection.deleteOne({ _id: new ObjectId(req.params.id) });
+    
+    if (result.deletedCount === 0) {
+      const error = new Error('User not found');
+      error.status = 404;
+      throw error;
+    }
+    
+    res.json({ success: true, message: 'User deleted successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /v1/users/import csv import
 // Warum Backend: validierung erzwungen, consistency (ACID), fehler zentralisiert
 // Query-Parameter: duplicateStrategy = 'error' | 'skip' (default: 'skip')
@@ -584,6 +610,60 @@ router.post('/import/process-duplicates', async (req, res, next) => {
       success: true,
       data: results
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /v1/users/export - CSV Export
+router.get('/export', async (req, res, next) => {
+  try {
+    const { db } = await connectToMongoDB();
+    const collection = db.collection('users');
+    
+    // Query-Builder für Filterung (gleiche Logik wie GET /users)
+    const query = {};
+    if (req.query.active !== undefined) {
+      query.active = req.query.active === 'true';
+    }
+    if (req.query.blocked !== undefined) {
+      query.blocked = req.query.blocked === 'true';
+    }
+    if (req.query.location) {
+      query.location = { $regex: req.query.location, $options: 'i' };
+    }
+    
+    // Sortierung
+    const sortBy = req.query.sortBy || 'name';
+    const sortOrder = req.query.sortOrder === 'desc' ? -1 : 1;
+    const sort = { [sortBy]: sortOrder };
+    
+    // Alle User abrufen (ohne Pagination für Export)
+    const users = await collection.find(query).sort(sort).toArray();
+    
+    // CSV Header
+    const csvHeader = 'Name,Email,IPAddress,Location,Active,LastLogin\n';
+    
+    // CSV Zeilen generieren
+    const csvRows = users.map(user => {
+      const name = `"${(user.name || '').replace(/"/g, '""')}"`;
+      const email = `"${(user.email || '').replace(/"/g, '""')}"`;
+      const ipAddress = `"${(user.ipAddress || '').replace(/"/g, '""')}"`;
+      const location = `"${(user.location || '').replace(/"/g, '""')}"`;
+      const active = user.active ? 'true' : 'false';
+      const lastLogin = user.lastLogin 
+        ? new Date(user.lastLogin).toISOString().replace('T', ' ').substring(0, 19)
+        : '';
+      
+      return `${name},${email},${ipAddress},${location},${active},${lastLogin}`;
+    });
+    
+    const csvContent = csvHeader + csvRows.join('\n');
+    
+    // CSV als Download senden
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="users_export_${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send(csvContent);
   } catch (error) {
     next(error);
   }

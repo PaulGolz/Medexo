@@ -7,9 +7,13 @@
           <v-card-title>
             <span class="text-h5">User Management</span>
             <v-spacer></v-spacer>
-            <v-btn color="primary" @click="openImportDialog">
+            <v-btn color="primary" @click="openImportDialog" class="mr-2">
               <v-icon start>mdi-upload</v-icon>
               CSV Import
+            </v-btn>
+            <v-btn color="info" @click="exportUsers" :loading="exporting" class="mr-2">
+              <v-icon start>mdi-download</v-icon>
+              CSV Export
             </v-btn>
             <v-btn color="success" @click="openCreateDialog">
               <v-icon start>mdi-plus</v-icon>
@@ -131,6 +135,15 @@
         </v-card-text>
         <v-card-actions>
           <v-spacer></v-spacer>
+          <v-btn 
+            v-if="editingUser" 
+            color="error" 
+            variant="text"
+            @click="deleteUser"
+            :loading="deleting"
+          >
+            Löschen
+          </v-btn>
           <v-btn @click="userDialog = false">Abbrechen</v-btn>
           <v-btn color="primary" @click="saveUser">Speichern</v-btn>
         </v-card-actions>
@@ -347,6 +360,12 @@ const importResult = ref(null)
 const duplicateStrategy = ref('skip') // 'error' oder 'skip'
 const processingDuplicates = ref(false)
 
+// Export
+const exporting = ref(false)
+
+// Delete
+const deleting = ref(false)
+
 // Snackbar
 const snackbar = reactive({
   show: false,
@@ -408,6 +427,54 @@ const saveUser = async () => {
     await loadUsers()
   } catch (error) {
     showSnackbar('Fehler beim Speichern', 'error')
+  }
+}
+
+const deleteUser = async () => {
+  if (!editingUser.value) return
+  
+  if (!confirm(`Möchten Sie den User "${editingUser.value.name}" wirklich löschen?`)) {
+    return
+  }
+  
+  deleting.value = true
+  try {
+    await userService.deleteUser(editingUser.value._id)
+    showSnackbar('User erfolgreich gelöscht', 'success')
+    userDialog.value = false
+    await loadUsers()
+  } catch (error) {
+    showSnackbar('Fehler beim Löschen', 'error')
+  } finally {
+    deleting.value = false
+  }
+}
+
+const exportUsers = async () => {
+  exporting.value = true
+  try {
+    const params = {}
+    if (filters.active !== null) params.active = filters.active
+    if (filters.blocked !== null) params.blocked = filters.blocked
+    if (filters.location) params.location = filters.location
+    
+    const response = await userService.exportUsers(params, sortBy.value, sortOrder.value)
+    
+    // Blob zu Download-Link erstellen (response ist bereits Blob)
+    const url = window.URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.setAttribute('download', `users_export_${new Date().toISOString().split('T')[0]}.csv`)
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+    
+    showSnackbar('CSV Export erfolgreich', 'success')
+  } catch (error) {
+    showSnackbar('Fehler beim Export', 'error')
+  } finally {
+    exporting.value = false
   }
 }
 
