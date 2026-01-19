@@ -74,6 +74,60 @@ router.get('', async (req, res, next) => {
   }
 });
 
+// GET /v1/users/export - CSV Export (MUSS VOR /:id kommen!)
+router.get('/export', async (req, res, next) => {
+  try {
+    const { db } = await connectToMongoDB();
+    const collection = db.collection('users');
+    
+    // Query-Builder für Filterung (gleiche Logik wie GET /users)
+    const query = {};
+    if (req.query.active !== undefined) {
+      query.active = req.query.active === 'true';
+    }
+    if (req.query.blocked !== undefined) {
+      query.blocked = req.query.blocked === 'true';
+    }
+    if (req.query.location) {
+      query.location = { $regex: req.query.location, $options: 'i' };
+    }
+    
+    // Sortierung
+    const sortBy = req.query.sortBy || 'name';
+    const sortOrder = req.query.sortOrder === 'desc' ? -1 : 1;
+    const sort = { [sortBy]: sortOrder };
+    
+    // Alle User abrufen (ohne Pagination für Export)
+    const users = await collection.find(query).sort(sort).toArray();
+    
+    // CSV Header
+    const csvHeader = 'Name,Email,IPAddress,Location,Active,LastLogin\n';
+    
+    // CSV Zeilen generieren
+    const csvRows = users.map(user => {
+      const name = `"${(user.name || '').replace(/"/g, '""')}"`;
+      const email = `"${(user.email || '').replace(/"/g, '""')}"`;
+      const ipAddress = `"${(user.ipAddress || '').replace(/"/g, '""')}"`;
+      const location = `"${(user.location || '').replace(/"/g, '""')}"`;
+      const active = user.active ? 'true' : 'false';
+      const lastLogin = user.lastLogin 
+        ? new Date(user.lastLogin).toISOString().replace('T', ' ').substring(0, 19)
+        : '';
+      
+      return `${name},${email},${ipAddress},${location},${active},${lastLogin}`;
+    });
+    
+    const csvContent = csvHeader + csvRows.join('\n');
+    
+    // CSV als Download senden
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="users_export_${new Date().toISOString().split('T')[0]}.csv"`);
+    res.send(csvContent);
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /v1/users/:id ein user 
 router.get('/:id', async (req, res, next) => {
   try {
@@ -115,24 +169,38 @@ router.post('', async (req, res, next) => {
     const { db } = await connectToMongoDB();
     const collection = db.collection('users');
     
-    // Email-Eindeutigkeit prüfen
-    const existing = await collection.findOne({ email: validation.data.email });
+    const normalizedEmail = validation.data.email.toLowerCase().trim();
+    const existing = await collection.findOne({ email: normalizedEmail });
+    
     if (existing) {
       const error = new Error('Email already exists');
       error.status = 409;
       throw error;
     }
     
-    // User erstellen
     const newUser = {
       ...validation.data,
-      blocked: false, // Default
+      email: normalizedEmail,
+      blocked: false,
       createdAt: new Date(),
       updatedAt: new Date()
     };
     
     const result = await collection.insertOne(newUser);
+    
+    if (!result.insertedId) {
+      const error = new Error('Failed to create user');
+      error.status = 500;
+      throw error;
+    }
+    
     const createdUser = await collection.findOne({ _id: result.insertedId });
+    
+    if (!createdUser) {
+      const error = new Error('User created but not found');
+      error.status = 500;
+      throw error;
+    }
     
     res.status(201).json({ success: true, data: createdUser });
   } catch (error) {
@@ -278,6 +346,44 @@ router.delete('/:id', async (req, res, next) => {
     }
     
     res.json({ success: true, message: 'User deleted successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /v1/users/bulk-delete - Mehrere User löschen
+router.post('/bulk-delete', async (req, res, next) => {
+  try {
+    const { userIds } = req.body;
+    
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      const error = new Error('userIds must be a non-empty array');
+      error.status = 400;
+      throw error;
+    }
+    
+    // Validiere alle IDs
+    const invalidIds = userIds.filter(id => !ObjectId.isValid(id));
+    if (invalidIds.length > 0) {
+      const error = new Error(`Invalid user ID format: ${invalidIds.join(', ')}`);
+      error.status = 400;
+      throw error;
+    }
+    
+    const { db } = await connectToMongoDB();
+    const collection = db.collection('users');
+    
+    // Konvertiere Strings zu ObjectIds
+    const objectIds = userIds.map(id => new ObjectId(id));
+    
+    // Lösche alle User mit den gegebenen IDs
+    const result = await collection.deleteMany({ _id: { $in: objectIds } });
+    
+    res.json({ 
+      success: true, 
+      message: `${result.deletedCount} user(s) deleted successfully`,
+      deletedCount: result.deletedCount
+    });
   } catch (error) {
     next(error);
   }
@@ -610,60 +716,6 @@ router.post('/import/process-duplicates', async (req, res, next) => {
       success: true,
       data: results
     });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// GET /v1/users/export - CSV Export
-router.get('/export', async (req, res, next) => {
-  try {
-    const { db } = await connectToMongoDB();
-    const collection = db.collection('users');
-    
-    // Query-Builder für Filterung (gleiche Logik wie GET /users)
-    const query = {};
-    if (req.query.active !== undefined) {
-      query.active = req.query.active === 'true';
-    }
-    if (req.query.blocked !== undefined) {
-      query.blocked = req.query.blocked === 'true';
-    }
-    if (req.query.location) {
-      query.location = { $regex: req.query.location, $options: 'i' };
-    }
-    
-    // Sortierung
-    const sortBy = req.query.sortBy || 'name';
-    const sortOrder = req.query.sortOrder === 'desc' ? -1 : 1;
-    const sort = { [sortBy]: sortOrder };
-    
-    // Alle User abrufen (ohne Pagination für Export)
-    const users = await collection.find(query).sort(sort).toArray();
-    
-    // CSV Header
-    const csvHeader = 'Name,Email,IPAddress,Location,Active,LastLogin\n';
-    
-    // CSV Zeilen generieren
-    const csvRows = users.map(user => {
-      const name = `"${(user.name || '').replace(/"/g, '""')}"`;
-      const email = `"${(user.email || '').replace(/"/g, '""')}"`;
-      const ipAddress = `"${(user.ipAddress || '').replace(/"/g, '""')}"`;
-      const location = `"${(user.location || '').replace(/"/g, '""')}"`;
-      const active = user.active ? 'true' : 'false';
-      const lastLogin = user.lastLogin 
-        ? new Date(user.lastLogin).toISOString().replace('T', ' ').substring(0, 19)
-        : '';
-      
-      return `${name},${email},${ipAddress},${location},${active},${lastLogin}`;
-    });
-    
-    const csvContent = csvHeader + csvRows.join('\n');
-    
-    // CSV als Download senden
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="users_export_${new Date().toISOString().split('T')[0]}.csv"`);
-    res.send(csvContent);
   } catch (error) {
     next(error);
   }

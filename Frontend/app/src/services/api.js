@@ -15,29 +15,23 @@ const api = axios.create({
   }
 })
 
-// Request Interceptor 
+// Request Interceptor
 api.interceptors.request.use(
-  config => {
-    // Logging, Token hinzufügen, etc.
-    return config
-  },
+  config => config,
   error => Promise.reject(error)
 )
 
 // Response Interceptor für zentrale Error-Behandlung
 api.interceptors.response.use(
-  response => response.data, // Nur Daten zurückgeben
+  response => response.data,
   error => {
-    // Zentrale Error-Behandlung
     if (error.response) {
-      // Server hat geantwortet mit Status /2xx
-      console.error('API Error:', error.response.status, error.response.data)
+      const errorData = error.response.data || {}
+      error.responseData = errorData
     } else if (error.request) {
-      // Request wurde gemacht, aber keine Antwort
-      console.error('Network Error:', error.request)
+      error.responseData = { message: 'Network Error: No response from server' }
     } else {
-      // Fehler beim erstellen des Requests
-      console.error('Error:', error.message)
+      error.responseData = { message: error.message || 'Request failed' }
     }
     return Promise.reject(error)
   }
@@ -64,11 +58,42 @@ export const userService = {
   
   exportUsers: (filters = {}, sortBy = 'name', sortOrder = 'asc') => {
     const params = { ...filters, sortBy, sortOrder }
-    // Separate axios instance für Blob-Responses (ohne Interceptor)
     return axiosRaw.get('/users/export', {
       params,
       responseType: 'blob'
+    }).then(response => {
+      const contentType = response.headers['content-type'] || ''
+      if (contentType.includes('application/json')) {
+        return response.data.text().then(text => {
+          try {
+            const errorData = JSON.parse(text)
+            return Promise.reject(new Error(errorData.message || errorData.error || 'Export failed'))
+          } catch (e) {
+            return Promise.reject(new Error('Export failed'))
+          }
+        })
+      }
+      return response
+    }).catch(error => {
+      if (error.response && error.response.data instanceof Blob) {
+        const contentType = error.response.headers['content-type'] || ''
+        if (contentType.includes('application/json')) {
+          return error.response.data.text().then(text => {
+            try {
+              const errorData = JSON.parse(text)
+              return Promise.reject(new Error(errorData.message || errorData.error || 'Export failed'))
+            } catch (e) {
+              return Promise.reject(new Error('Export failed'))
+            }
+          })
+        }
+      }
+      return Promise.reject(error)
     })
+  },
+  
+  deleteUsers: (userIds) => {
+    return api.post('/users/bulk-delete', { userIds })
   },
   
   importUsers: (file, duplicateStrategy = 'skip') => {

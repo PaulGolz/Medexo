@@ -15,9 +15,18 @@
               <v-icon start>mdi-download</v-icon>
               CSV Export
             </v-btn>
-            <v-btn color="success" @click="openCreateDialog">
+            <v-btn color="success" @click="openCreateDialog" class="mr-2">
               <v-icon start>mdi-plus</v-icon>
               Neuer User
+            </v-btn>
+            <v-btn 
+              color="error" 
+              @click="deleteSelectedUsers" 
+              :disabled="selectedUsers.length === 0"
+              :loading="deleting"
+            >
+              <v-icon start>mdi-delete</v-icon>
+              Löschen ({{ selectedUsers.length }})
             </v-btn>
           </v-card-title>
         </v-card>
@@ -84,6 +93,7 @@
       <v-col>
         <v-card>
           <v-data-table
+            v-model="selectedUsers"
             :headers="headers"
             :items="users"
             :loading="loading"
@@ -92,6 +102,8 @@
             @update:page="page = $event"
             @update:items-per-page="itemsPerPage = $event"
             :sort-by="[{key: sortBy, order: sortOrder}]"
+            show-select
+            item-value="_id"
             class="elevation-1"
           >
             <template v-slot:item.active="{ item }">
@@ -310,6 +322,7 @@ import { userService } from '@/services/api'
 
 // Data
 const users = ref([])
+const selectedUsers = ref([])
 const loading = ref(false)
 const page = ref(1)
 const itemsPerPage = ref(10)
@@ -331,6 +344,7 @@ const sortOptions = [
 
 // Header
 const headers = [
+  { title: '', key: 'data-table-select', sortable: false, width: '40px' },
   { title: 'Name', key: 'name', sortable: true },
   { title: 'Email', key: 'email', sortable: true },
   { title: 'IP Address', key: 'ipAddress' },
@@ -376,15 +390,22 @@ const snackbar = reactive({
 const loadUsers = async () => {
   loading.value = true
   try {
-    const params = {}
-    if (filters.active !== null) params.active = filters.active
-    if (filters.blocked !== null) params.blocked = filters.blocked
+    const params = {
+      limit: 10000, // Alle User laden für Client-seitige Pagination
+      page: 1
+    }
+    if (filters.active !== null && filters.active !== undefined) params.active = filters.active
+    if (filters.blocked !== null && filters.blocked !== undefined) params.blocked = filters.blocked
     if (filters.location) params.location = filters.location
     
     const response = await userService.getUsers(params, sortBy.value, sortOrder.value)
-    users.value = response.data || response
+    // API Interceptor gibt response.data zurück: { success: true, data: [...], pagination: {...} }
+    const usersArray = Array.isArray(response) ? response : (response?.data || [])
+    users.value = usersArray
+    selectedUsers.value = []
   } catch (error) {
     showSnackbar('Fehler beim Laden der User', 'error')
+    users.value = []
   } finally {
     loading.value = false
   }
@@ -422,11 +443,16 @@ const saveUser = async () => {
     } else {
       await userService.createUser(userFormData)
       showSnackbar('User erfolgreich erstellt', 'success')
+      page.value = 1
+      sortBy.value = 'createdAt'
+      sortOrder.value = 'desc'
     }
     userDialog.value = false
     await loadUsers()
   } catch (error) {
-    showSnackbar('Fehler beim Speichern', 'error')
+    const errorData = error.responseData || error.response?.data || {}
+    const errorMessage = errorData.message || errorData.error || error.message || 'Fehler beim Speichern'
+    showSnackbar(errorMessage, 'error')
   }
 }
 
@@ -450,17 +476,41 @@ const deleteUser = async () => {
   }
 }
 
+const deleteSelectedUsers = async () => {
+  if (selectedUsers.value.length === 0) return
+  
+  const count = selectedUsers.value.length
+  if (!confirm(`Möchten Sie wirklich ${count} User(s) löschen?`)) {
+    return
+  }
+  
+  deleting.value = true
+  try {
+    const userIds = selectedUsers.value
+    const response = await userService.deleteUsers(userIds)
+    const result = response.data || response
+    
+    showSnackbar(`${result.deletedCount || count} User(s) erfolgreich gelöscht`, 'success')
+    selectedUsers.value = []
+    await loadUsers()
+  } catch (error) {
+    showSnackbar('Fehler beim Löschen', 'error')
+  } finally {
+    deleting.value = false
+  }
+}
+
 const exportUsers = async () => {
   exporting.value = true
   try {
     const params = {}
-    if (filters.active !== null) params.active = filters.active
-    if (filters.blocked !== null) params.blocked = filters.blocked
+    if (filters.active !== null && filters.active !== undefined) params.active = filters.active
+    if (filters.blocked !== null && filters.blocked !== undefined) params.blocked = filters.blocked
     if (filters.location) params.location = filters.location
     
     const response = await userService.exportUsers(params, sortBy.value, sortOrder.value)
     
-    // Blob zu Download-Link erstellen (response ist bereits Blob)
+    // Blob zu Download-Link erstellen
     const url = window.URL.createObjectURL(response.data)
     const link = document.createElement('a')
     link.href = url
@@ -472,7 +522,7 @@ const exportUsers = async () => {
     
     showSnackbar('CSV Export erfolgreich', 'success')
   } catch (error) {
-    showSnackbar('Fehler beim Export', 'error')
+    showSnackbar(error.message || 'Fehler beim Export', 'error')
   } finally {
     exporting.value = false
   }
